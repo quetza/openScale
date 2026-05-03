@@ -30,61 +30,116 @@ import kotlin.math.min
 /**
  * Handler for the eufy Smart Scale A1 (model T9120).
  *
- * The T9120 uses the same 0xFFF0 service as InlifeHandler, but different
- * characteristic assignments:
- *   Notify:  0000FFF4-0000-1000-8000-00805f9b34fb  (InlifeHandler wrongly uses FFF1)
- *   Write:   0000FFF1-0000-1000-8000-00805f9b34fb  (InlifeHandler wrongly uses FFF2)
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHY THIS HANDLER EXISTS
+ * ─────────────────────────────────────────────────────────────────────────────
+ * The T9120 advertises service UUID 0xFFF0, which is also used by InlifeHandler.
+ * InlifeHandler tries to subscribe to FFF1 for notifications, but on the T9120
+ * that characteristic has no CCC descriptor — causing a fatal "could not get CCC
+ * descriptor" error and no data received.
  *
- * To avoid stealing devices from InlifeHandler we match only on the device
- * name prefix "eufy T9120".  If a device doesn't advertise that name but still
- * uses service 0xFFF0, InlifeHandler will take it as before.
+ * This handler is registered before InlifeHandler in ScaleFactory and matches
+ * only on the name prefix "eufy T9120", so InlifeHandler continues to own all
+ * other FFF0-service devices it previously handled.
  *
- * Frame format (14 bytes):
- *   [0]      = 0x02  (start)
- *   [1]      = command
- *   [2..11]  = payload
- *   [12]     = XOR checksum over bytes [1..11]
- *   [13]     = 0xAA (end)
+ * ─────────────────────────────────────────────────────────────────────────────
+ * GATT CHARACTERISTICS
+ * ─────────────────────────────────────────────────────────────────────────────
+ *   Service:  0000FFF0-0000-1000-8000-00805f9b34fb
+ *   Notify:   0000FFF4-0000-1000-8000-00805f9b34fb  <- correct for T9120
+ *   Write:    0000FFF1-0000-1000-8000-00805f9b34fb  <- correct for T9120
  *
- * References:
- *   https://github.com/bdr99/eufylife-ble-client/blob/main/eufylife_ble_client/devices.py
+ * Source: https://github.com/bdr99/eufylife-ble-client (devices.py / client.py)
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WIRE PROTOCOL — CONFIRMED FACTS
+ * ─────────────────────────────────────────────────────────────────────────────
+ * All frames are 11 bytes. Evidence:
+ *   - Every notification observed on FFF4 was 11 bytes.
+ *   - eufylife-ble-client _handle_weight_update_t9120() checks len(data)==11.
+ *
+ * Frame layout:
+ *   Byte  0     : 0xCF — frame type marker (always)
+ *   Bytes 1-2   : impedance, little-endian uint16, units of 0.1 ohm
+ *                 Zero in live-weight frames; non-zero in result frames.
+ *   Bytes 3-4   : weight, little-endian uint16, units of 0.01 kg
+ *                 i.e. weight_kg = ((data[4] << 8) | data[3]) / 100.0
+ *   Bytes 5-8   : unknown / reserved (observed as 0x00 in most frames)
+ *   Byte  9     : status
+ *                   0x01 = live/unstable weight (stepping on)
+ *                   0x00 = stable/final weight  -> publish measurement
+ *                   0x02 = weight limit exceeded
+ *   Byte  10    : XOR checksum of bytes [0..9]
+ *
+ * Verified:
+ *   - Weight encoding confirmed: observed 83.80 kg matched scale display.
+ *     Source: eufylife-ble-client _handle_weight_update_t9120 uses identical formula.
+ *   - Checksum: XOR of bytes [0..9] == byte [10] verified on all observed frames.
+ *   - Status byte 9: 0x01 during stepping-on sequence, 0x00 on stable frames.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WIRE PROTOCOL — ASSUMPTIONS (NOT YET VERIFIED AGAINST OFFICIAL APP OUTPUT)
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 1. IMPEDANCE FIELD (bytes 1-2):
+ *    Assumed to be little-endian uint16 in units of 0.1 ohm.
+ *    Basis: observed values 4000 and 4070 in result frames -> 400.0 and 407.0 ohm,
+ *    which are plausible two-leg BIA values for an adult male at ~84 kg.
+ *    The T9146 (same FFF0/FFF4/FFF1 service/characteristics) sends a stable-weight
+ *    broadcast containing "weight,impedance,..." as a comma-separated string parsed
+ *    by T9146CmdDispatcher; the impedance field position and the 0.1 ohm unit are
+ *    inferred by analogy with that model and cross-checked against the byte values.
+ *    RISK: If the unit is 1 ohm (not 0.1 ohm), the raw values 4000/4070 are far
+ *    too high for BIA and the body-composition results will be wrong.
+ *
+ * 2. BODY COMPOSITION FORMULAS:
+ *    The official EufyLife app delegates all BIA calculations to the Holtek
+ *    libHTBodyfat native library (identified by APK decompilation). That library
+ *    is closed-source. The formulas used here are open BIA approximations sourced
+ *    from ble-scale-sync (KristianP26/ble-scale-sync, body-comp-helpers.ts) and
+ *    are NOT identical to the Holtek library. Results will be in the right
+ *    ballpark but may differ from the official app by a few percent.
+ *    RISK: Systematic offset vs. official app is expected and acceptable for
+ *    trend-tracking; absolute accuracy is not guaranteed.
+ *
+ * 3. RESULT-FRAME TRIGGER:
+ *    A result frame is identified by status byte [9] == 0x00 AND bytes [1:3] != 0.
+ *    Basis: all stable/final frames observed had byte [9] == 0x00; the two frames
+ *    that also had non-zero bytes [1:3] appeared after weight stabilised,
+ *    consistent with a final measurement including impedance.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * FURTHER READING
+ * ─────────────────────────────────────────────────────────────────────────────
+ *   https://github.com/bdr99/eufylife-ble-client
+ *   https://github.com/KristianP26/ble-scale-sync (body-comp-helpers.ts)
+ *   EufyLife APK decompilation: com.oceanwing.eufylife /
+ *     diapatcher/T9146CmdDispatcher, com.belter.fat.ScaleSDKManager,
+ *     com.holtek.libHTBodyfat.HTBodyResultTwoLegs
  */
 class EufyHandler : ScaleDeviceHandler() {
 
-    // ---- GATT UUIDs ----
-    private val SVC         : UUID = uuid16(0xFFF0)
-    private val CHR_NOTIFY  : UUID = uuid16(0xFFF4) // notify  (was FFF1 in InlifeHandler — the bug)
-    private val CHR_CMD     : UUID = uuid16(0xFFF1) // write   (was FFF2 in InlifeHandler)
+    // ── GATT UUIDs ────────────────────────────────────────────────────────────
+    private val SVC        : UUID = uuid16(0xFFF0)
+    private val CHR_NOTIFY : UUID = uuid16(0xFFF4)
+    private val CHR_CMD    : UUID = uuid16(0xFFF1)
 
-    // ---- Wire format ----
-    private val START    : Byte = 0x02
-    private val END      : Byte = 0xAA.toByte()
-    private val FRAME_LEN        = 14
+    // ── Frame constants ───────────────────────────────────────────────────────
+    private val FRAME_LEN         = 11
+    private val MARKER     : Byte = 0xCF.toByte()
+    private val STATUS_LIVE       = 0x01
+    private val STATUS_STABLE     = 0x00
+    private val STATUS_OVERWEIGHT = 0x02
 
-    // Commands (same as Inlife protocol)
-    private val CMD_SET_USER = 0xD2
-    private val CMD_WEIGHT   = 0xD8
-    private val CMD_RESULT   = 0xDD
-    private val CMD_USER_ACK = 0xDF
-    private val CMD_FINISH   = 0xD4
+    // ── Device matching ───────────────────────────────────────────────────────
 
-    // De-duplication
-    private var lastFrame: ByteArray? = null
-
-    // ---- Device matching ----
     override fun supportFor(device: ScannedDeviceInfo): DeviceSupport? {
         val name = (device.name ?: "").lowercase(Locale.ROOT)
-
-        // Only claim devices whose name starts with "eufy t9120".
-        // This avoids stealing other FFF0-service devices that InlifeHandler handles.
         if (!name.startsWith("eufy t9120")) return null
 
         val caps = setOf(
             DeviceCapability.LIVE_WEIGHT_STREAM,
-            DeviceCapability.BODY_COMPOSITION,
-            DeviceCapability.USER_SYNC
+            DeviceCapability.BODY_COMPOSITION
         )
-
         return DeviceSupport(
             displayName = "eufy Smart Scale A1 (T9120)",
             capabilities = caps,
@@ -93,141 +148,126 @@ class EufyHandler : ScaleDeviceHandler() {
         )
     }
 
-    // ---- Session lifecycle ----
+    // ── Session lifecycle ─────────────────────────────────────────────────────
+
     override fun onConnected(user: ScaleUser) {
         setNotifyOn(SVC, CHR_NOTIFY)
-
-        val level = athleteLevel(user) + 1   // 1=general, 2=amateur, 3=pro
-        val sex   = if (user.gender.isMale()) 0 else 1
-        val id    = user.id and 0xFF
-        val age   = user.age and 0xFF
-        val hCm   = user.bodyHeight.toInt() and 0xFF
-
-        sendCommand(CMD_SET_USER, level, sex, id, age, hCm)
-
         userInfo(R.string.bt_info_step_on_scale)
     }
 
     override fun onNotification(characteristic: UUID, data: ByteArray, user: ScaleUser) {
         if (characteristic != CHR_NOTIFY) return
+
         if (data.size != FRAME_LEN) {
-            logW("Unexpected frame length ${data.size}, expected $FRAME_LEN — ignoring")
+            logW("Unexpected frame length ${data.size} (expected $FRAME_LEN) — ignored")
             return
         }
-        if (data[0] != START || data.last() != END) {
-            logE("Bad start/end byte: 0x%02X..0x%02X".format(data[0], data.last()))
+        if (data[0] != MARKER) {
+            logW("Unexpected frame marker 0x%02X (expected 0xCF) — ignored".format(data[0]))
             return
         }
-        if (xorRange(data, 1, FRAME_LEN - 2) != 0.toByte()) {
-            logE("XOR checksum invalid")
-            return
-        }
-        if (lastFrame?.contentEquals(data) == true) {
-            logD("Duplicate frame — ignored")
-            return
-        }
-        lastFrame = data.copyOf()
 
-        when (data[1].toInt() and 0xFF) {
-            0x0F -> logD("Scale idle/disconnect signal")
+        // Verify XOR checksum: XOR of bytes [0..9] must equal byte [10]
+        var xor = 0
+        for (i in 0..9) xor = xor xor (data[i].toInt() and 0xFF)
+        if ((xor and 0xFF).toByte() != data[10]) {
+            logW("XOR checksum mismatch — frame discarded")
+            return
+        }
 
-            CMD_WEIGHT -> {
-                val w = u16Be(data, 2) / 10.0f
-                logD("Live weight = %.2f kg".format(w))
-                userInfo(R.string.bluetooth_scale_info_measuring_weight, w)
+        val weightKg  = u16Le(data, 3) / 100.0f
+        val status    = data[9].toInt() and 0xFF
+        val impedance = u16Le(data, 1)  // 0 in live frames; assumed non-zero in result frames
+
+        when (status) {
+            STATUS_OVERWEIGHT -> {
+                logW("Weight limit exceeded")
+                userInfo(R.string.bt_info_overweight)
             }
 
-            CMD_RESULT -> {
-                val flag = data[11].toInt() and 0xFF
-                if (flag == 0x80 || flag == 0x81) {
-                    processMeasurementNew(data)
+            STATUS_LIVE -> {
+                logD("Live weight: %.2f kg".format(weightKg))
+                userInfo(R.string.bluetooth_scale_info_measuring_weight, weightKg)
+            }
+
+            STATUS_STABLE -> {
+                if (impedance == 0) {
+                    // Stable frame with no impedance — weight only.
+                    // Occurs if feet were not correctly placed for BIA measurement.
+                    logD("Stable weight only (no impedance): %.2f kg".format(weightKg))
+                    publish(ScaleMeasurement().apply { weight = weightKg })
                 } else {
-                    processMeasurementLegacy(data)
+                    // Result frame: weight + impedance -> full body composition.
+                    val impedanceOhm = impedance / 10.0f  // ASSUMPTION: units of 0.1 ohm
+                    logD("Result: weight=%.2f kg, impedance=%.1f ohm".format(weightKg, impedanceOhm))
+                    publishWithBodyComp(weightKg, impedanceOhm, user)
                 }
             }
 
-            CMD_USER_ACK -> {
-                val ok = data[2].toInt() == 0
-                logD("User-ack: ${if (ok) "OK" else "error"}")
-            }
-
-            else -> logD("Unknown command 0x%02X".format(data[1]))
+            else -> logD("Unknown status 0x%02X — ignored".format(status))
         }
     }
 
-    // ---- Legacy result frame: weight + LBM + visceral factor ----
-    private fun processMeasurementLegacy(d: ByteArray) {
-        val weight = u16Be(d, 2) / 10.0f
-        var lbm    = u24Be(d, 4) / 1000.0f
-        val viscF  = u16Be(d, 7) / 10.0f
-        @Suppress("UNUSED_VARIABLE")
-        val bmr    = u16Be(d, 9) / 10.0f  // unused; kept for parity with InlifeHandler
+    // ── Body composition ──────────────────────────────────────────────────────
 
-        if (lbm >= 0xFFFFFF / 1000.0f) {
-            logW("LBM sentinel — feet not correctly placed on scale?")
-            return
-        }
+    /**
+     * Calculates and publishes body composition from weight and impedance.
+     *
+     * Uses open BIA formulas from ble-scale-sync (body-comp-helpers.ts).
+     * Results will differ somewhat from the official app (Holtek libHTBodyfat).
+     * See the ASSUMPTIONS section in the class documentation.
+     */
+    private fun publishWithBodyComp(weightKg: Float, impedanceOhm: Float, user: ScaleUser) {
+        val heightCm = user.bodyHeight.toDouble()
+        val heightM  = heightCm / 100.0
+        val age      = user.age.toDouble()
+        val male     = user.gender.isMale()
+        val athlete  = athleteLevel(user) > 0
+        val w        = weightKg.toDouble()
+        val z        = impedanceOhm.toDouble()
 
-        val u = currentAppUser()
+        // BIA lean body mass — coefficients from ble-scale-sync body-comp-helpers.ts
+        val c1: Double; val c2: Double; val c3: Double; val c4: Double
+        if (male && athlete)      { c1=0.637; c2=0.205; c3=-0.18;  c4=12.5  }
+        else if (male)            { c1=0.503; c2=0.165; c3=-0.158; c4=17.8  }
+        else if (athlete)         { c1=0.55;  c2=0.18;  c3=-0.15;  c4=8.5   }
+        else                      { c1=0.49;  c2=0.15;  c3=-0.13;  c4=11.5  }
 
-        when (athleteLevel(u)) {
-            1 -> lbm *= 1.0427f
-            2 -> lbm *= 1.0958f
-        }
+        val h2r = (heightCm * heightCm) / z
+        var lbm = c1 * h2r + c2 * w + c3 * age + c4
+        if (lbm > w) lbm = w * 0.96
 
-        val fatKg  = weight - lbm
-        val fatPct = (fatKg / weight) * 100.0
-        val water  = (0.73 * (weight - fatKg) / weight) * 100.0
-        val muscle = (0.548 * lbm / weight) * 100.0
-        val boneKg = 0.05158 * lbm
+        val fatKg      = w - lbm
+        val fatPct     = (fatKg / w) * 100.0
+        val waterPct   = (lbm * (if (athlete) 0.74 else 0.73) / w) * 100.0
+        val musclePct  = (lbm * (if (athlete) 0.60 else 0.54) / w) * 100.0
+        val boneMass   = lbm * 0.042
+        val bmi        = w / (heightM * heightM)
+        val visceralFat = if (fatPct > 10.0)
+            clamp(fatPct * 0.55 - 4.0 + age * 0.08, 1.0, 59.0) else 1.0
 
-        val height = u.bodyHeight
-        var visceral = viscF - 50.0
-        if (u.gender.isMale()) {
-            if (height >= 1.6 * weight + 63) {
-                visceral += (0.765 - 0.002 * height) * weight
-            } else {
-                visceral += 380 * weight / (((0.0826 * height * height) - 0.4 * height) + 48)
-            }
-        } else {
-            if (weight <= height / 2 - 13) {
-                visceral += (0.691 - 0.0024 * height) * weight
-            } else {
-                visceral += 500 * weight / (((0.1158 * height * height) + 1.45 * height) - 120)
-            }
-        }
-
-        val lvl = athleteLevel(u)
-        if (lvl != 0) {
-            if (visceral >= 21) visceral *= 0.85
-            if (visceral >= 10) visceral *= 0.8
-            visceral -= lvl * 2
-        }
+        logD(
+            "Body comp: fat=%.1f%% water=%.1f%% muscle=%.1f%% bone=%.2fkg " +
+            "BMI=%.1f visceral=%.0f".format(fatPct, waterPct, musclePct, boneMass, bmi, visceralFat)
+        )
 
         publish(ScaleMeasurement().apply {
-            this.weight      = weight
-            this.fat         = clamp(fatPct,   5.0, 80.0)
-            this.water       = clamp(water,    5.0, 80.0)
-            this.muscle      = clamp(muscle,   5.0, 80.0)
-            this.bone        = clamp(boneKg,   0.5,  8.0)
-            this.lbm         = lbm
-            this.visceralFat = clamp(visceral, 1.0, 50.0)
+            weight      = weightKg
+            fat         = clamp(fatPct,    3.0,  75.0).toFloat()
+            water       = clamp(waterPct,  5.0,  80.0).toFloat()
+            muscle      = clamp(musclePct, 5.0,  90.0).toFloat()
+            bone        = clamp(boneMass,  0.3,   8.0).toFloat()
+            lbm         = lbm.toFloat()
+            visceralFat = visceralFat.toFloat()
+            this.bmi    = bmi.toFloat()
         })
-
-        sendCommand(CMD_FINISH)
     }
 
-    // ---- New result frame: weight + impedance ----
-    private fun processMeasurementNew(d: ByteArray) {
-        val weight    = u16Be(d, 2) / 10.0f
-        val impedance = u32Be(d, 4).toLong()
-        logD("Result (new): weight=%.2f kg, impedance=%d".format(weight, impedance))
-        // Phase 2: plug BIA formulas here once weight is confirmed working.
-        publish(ScaleMeasurement().apply { this.weight = weight })
-        sendCommand(CMD_FINISH)
-    }
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
-    // ---- Helpers ----
+    /** Little-endian unsigned 16-bit integer from bytes [off] and [off+1]. */
+    private fun u16Le(d: ByteArray, off: Int): Int =
+        (d[off].toInt() and 0xFF) or ((d[off + 1].toInt() and 0xFF) shl 8)
 
     private fun athleteLevel(u: ScaleUser): Int = when (u.activityLevel) {
         ActivityLevel.SEDENTARY, ActivityLevel.MILD -> 0
@@ -236,40 +276,5 @@ class EufyHandler : ScaleDeviceHandler() {
         else                                        -> 0
     }
 
-    private fun clamp(v: Double, lo: Double, hi: Double): Float =
-        min(hi, max(lo, v)).toFloat()
-
-    private fun sendCommand(command: Int, vararg params: Int) {
-        val frame = ByteArray(FRAME_LEN) { 0 }
-        frame[0] = START
-        frame[1] = (command and 0xFF).toByte()
-        var i = 2
-        for (p in params) {
-            if (i >= FRAME_LEN - 2) break
-            frame[i++] = (p and 0xFF).toByte()
-        }
-        frame[FRAME_LEN - 2] = xorRange(frame, 1, FRAME_LEN - 3)
-        frame[FRAME_LEN - 1] = END
-        writeTo(SVC, CHR_CMD, frame, withResponse = true)
-    }
-
-    private fun xorRange(b: ByteArray, from: Int, toInclusive: Int): Byte {
-        var x = 0
-        for (i in from..toInclusive) x = x xor (b[i].toInt() and 0xFF)
-        return (x and 0xFF).toByte()
-    }
-
-    private fun u16Be(d: ByteArray, off: Int): Float =
-        (((d[off].toInt() and 0xFF) shl 8) or (d[off + 1].toInt() and 0xFF)).toFloat()
-
-    private fun u24Be(d: ByteArray, off: Int): Float =
-        (((d[off].toInt()     and 0xFF) shl 16) or
-         ((d[off + 1].toInt() and 0xFF) shl  8) or
-          (d[off + 2].toInt() and 0xFF)).toFloat()
-
-    private fun u32Be(d: ByteArray, off: Int): Int =
-        ((d[off].toInt()     and 0xFF) shl 24) or
-        ((d[off + 1].toInt() and 0xFF) shl 16) or
-        ((d[off + 2].toInt() and 0xFF) shl  8) or
-         (d[off + 3].toInt() and 0xFF)
+    private fun clamp(v: Double, lo: Double, hi: Double): Double = min(hi, max(lo, v))
 }
