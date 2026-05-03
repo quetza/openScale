@@ -18,4 +18,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
-	  path: android_app/app/build/outputs/apk/debug/openScale-debug.apk
+          path: android_app/app/build/outputs/apk/debug/openScale-debug.apk
