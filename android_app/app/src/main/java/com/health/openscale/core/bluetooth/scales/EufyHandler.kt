@@ -250,14 +250,17 @@ class EufyHandler : ScaleDeviceHandler() {
             "BMI=%.1f visceral=%.0f".format(fatPct, waterPct, musclePct, boneMass, bmi, visceralFat)
         )
 
+        val lbmFloat         = lbm.toFloat()
+        val visceralFatFloat = visceralFat.toFloat()
+
         publish(ScaleMeasurement().apply {
             weight      = weightKg
             fat         = clamp(fatPct,    3.0,  75.0).toFloat()
             water       = clamp(waterPct,  5.0,  80.0).toFloat()
             muscle      = clamp(musclePct, 5.0,  90.0).toFloat()
             bone        = clamp(boneMass,  0.3,   8.0).toFloat()
-            lbm         = lbm.toFloat()
-            visceralFat = visceralFat.toFloat()
+            lbm         = lbmFloat
+            visceralFat = visceralFatFloat
             impedance   = impedanceOhm.toDouble()
         })
     }
