@@ -38,6 +38,7 @@ import com.health.openscale.core.bluetooth.scales.HoffenBbs8107Handler
 import com.health.openscale.core.bluetooth.scales.HuaweiAH100Handler
 import com.health.openscale.core.bluetooth.scales.HuaweiCH100SHandler
 import com.health.openscale.core.bluetooth.scales.IHealthHS3Handler
+import com.health.openscale.core.bluetooth.scales.EufyHandler
 import com.health.openscale.core.bluetooth.scales.InlifeHandler
 import com.health.openscale.core.bluetooth.scales.LinkMode
 import com.health.openscale.core.bluetooth.scales.MGBHandler
@@ -110,6 +111,7 @@ class ScaleFactory @Inject constructor(
         RunstarR5Handler(),
         MGBHandler(),
         MedisanaBs44xHandler(),
+        EufyHandler(),
         InlifeHandler(),
         IHealthHS3Handler(),
         HuaweiAH100Handler(),
