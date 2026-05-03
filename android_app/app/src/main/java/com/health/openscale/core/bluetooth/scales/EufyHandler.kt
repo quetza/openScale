@@ -182,7 +182,6 @@ class EufyHandler : ScaleDeviceHandler() {
         when (status) {
             STATUS_OVERWEIGHT -> {
                 logW("Weight limit exceeded")
-                userInfo(R.string.bt_info_overweight)
             }
 
             STATUS_LIVE -> {
@@ -259,7 +258,7 @@ class EufyHandler : ScaleDeviceHandler() {
             bone        = clamp(boneMass,  0.3,   8.0).toFloat()
             lbm         = lbm.toFloat()
             visceralFat = visceralFat.toFloat()
-            this.bmi    = bmi.toFloat()
+            impedance   = impedanceOhm.toDouble()
         })
     }
 
