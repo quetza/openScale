@@ -259,8 +259,8 @@ class EufyHandler : ScaleDeviceHandler() {
             water       = clamp(waterPct,  5.0,  80.0).toFloat()
             muscle      = clamp(musclePct, 5.0,  90.0).toFloat()
             bone        = clamp(boneMass,  0.3,   8.0).toFloat()
-            lbm         = lbmFloat
-            visceralFat = visceralFatFloat
+            this.lbm         = lbmFloat
+            this.visceralFat = visceralFatFloat
             impedance   = impedanceOhm.toDouble()
         })
     }
